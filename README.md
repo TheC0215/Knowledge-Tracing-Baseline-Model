@@ -57,7 +57,7 @@ pip install numpy pandas scikit-learn tqdm torch
 
 ### 1. 准备数据集
 
-把原始 CSV 放入对应的 `data/<数据集>/` 目录：
+下载并把原始 CSV 放入对应的 `data/<数据集>/` 目录：
 
 | 目录 | 需要的文件 | 数据来源 |
 | ---- | ---------- | -------- |
