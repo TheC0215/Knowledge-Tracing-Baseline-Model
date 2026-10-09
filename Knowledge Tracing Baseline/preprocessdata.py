@@ -57,12 +57,15 @@ DATASET_CONFIGS = {
 }
 
 # ========== 选择数据集 ==========
-dataname = "assist09"  # ← 改这里切换数据集
+dataname = "assist12"  # ← 改这里切换数据集
 
 # 序列最大长度：与 DGKT-SC/main.py、other model/main_baseline.py 的 max_seq=200 保持一致。
 # 预处理时按此长度把超长会话切成多段（pyKT 风格：先保留头部余段，再把尾部按 MAX_SEQ 等分），
 # 输出文件不再有超长行，下游加载时也不会因整条会话同时驻留内存而 OOM。
 MAX_SEQ = 200
+
+# 学生最少交互数：剔除交互总数少于此值的学生（默认 3，改这里调整；设 0 或 1 表示不过滤）
+MIN_INTER = 3
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data", dataname)
@@ -149,6 +152,14 @@ def process_csv(csv_path, cfg):
         count('移除脚手架题目后', df, cfg)
     elif original_col:
         print(f'⚠ 未找到列 "{original_col}"，跳过脚手架过滤')
+
+    # 剔除交互数过少的学生（MIN_INTER 默认 3，见文件顶部常量）
+    if MIN_INTER > 1:
+        user_col = cfg["col_user"]
+        user_cnt = df[user_col].value_counts()
+        keep_users = user_cnt[user_cnt >= MIN_INTER].index
+        df = df[df[user_col].isin(keep_users)]
+        count('移除低交互学生后', df, cfg)
 
     return df
 
