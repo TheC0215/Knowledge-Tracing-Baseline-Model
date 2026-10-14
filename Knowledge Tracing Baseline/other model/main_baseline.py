@@ -84,9 +84,11 @@ MODELS = {
                                      num_attn_heads=8, dropout=0.2, use_CL=False,
                                      emb_type='stoc_qid'),
                 lr=1e-4, batch_size=256),
+    # GKT lr 原为 pyKT 默认 1e-2，在 NeurIPS 2020（每题 4~6 个知识点、满 200 步）上
+    # 会数值发散（嵌入权重变 NaN，已由调试守卫复现定位），统一降到 1e-3
     'gkt': dict(cls=GKT, params=dict(hidden_dim=64, emb_size=64, dropout=0.5,
                                      graph_type='transition'),
-                lr=1e-2, batch_size=16),
+                lr=1e-3, batch_size=16),
 }
 
 def build_model(model_name, pro_max, ques_skill_path, train_path, device):
