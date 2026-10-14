@@ -109,7 +109,7 @@ python main_baseline.py --model_name gkt --dataset assist09 --n_folds 5
 | SAKT | 1e-3 | 256 |
 | simpleKT | 1e-4 | 256 |
 | UKT | 1e-4 | 256 |
-| GKT | 1e-2 | 16 |
+| GKT | 1e-3 | 16 |
 
 训练结束后，在 `other model/` 下输出：
 
