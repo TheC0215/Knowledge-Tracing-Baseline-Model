@@ -24,7 +24,10 @@ import torch.nn as nn
 from akt import AKT
 from dkt import DKT
 from dkvmn import DKVMN
+from dygkt import DyGKT
 from gkt import GKT, build_dense_graph, build_pro2skill, build_transition_graph
+from mikt import MIKT
+from rigl import RIGL
 from run import run_epoch
 from sakt import SAKT
 from simplekt import simpleKT
@@ -84,15 +87,29 @@ MODELS = {
                                      num_attn_heads=8, dropout=0.2, use_CL=False,
                                      emb_type='stoc_qid'),
                 lr=1e-4, batch_size=256),
-    # GKT lr 原为 pyKT 默认 1e-2，在 NeurIPS 2020（每题 4~6 个知识点、满 200 步）上
-    # 会数值发散（嵌入权重变 NaN，已由调试守卫复现定位），统一降到 1e-3
     'gkt': dict(cls=GKT, params=dict(hidden_dim=64, emb_size=64, dropout=0.5,
                                      graph_type='transition'),
-                lr=1e-3, batch_size=16),
+                lr=1e-2, batch_size=16),
+    # ---- 新增三个模型（超参取自各自论文仓库脚本，见各文件顶部说明）----
+    # MIKT-master/main.py：d=64, state_d=64, p=0.4, lr=2e-3, batch=80, epochs=200
+    'mikt': dict(cls=MIKT, params=dict(embed=64, state_d=64, max_seq=200, p=0.4),
+                 lr=2e-3, batch_size=80),
+    # DyGKT-main：node/edge_dim=64, time_dim=16, num_neighbors=50, dropout=0.5
+    'dygkt': dict(cls=DyGKT, params=dict(d_node=64, time_dim=16, num_neighbors=50,
+                                         dropout=0.5, time_threshold=20),
+                  lr=1e-3, batch_size=64),
+    # RIGL-main/train_rigl.py：d_model=256, d_ff=256, n_blocks=4, heads=8, dropout=0.2, lr=1e-4
+    'rigl': dict(cls=RIGL, params=dict(d_model=256, d_ff=256, n_blocks=4,
+                                       num_attn_heads=8, dropout=0.2,
+                                       final_fc_dim=256, seq_len=200,
+                                       top_num=3, flip_rate=0.05, cl_weight=1e-3,
+                                       graph_mode='proto'),
+                 lr=1e-4, batch_size=64),
 }
 
 def build_model(model_name, pro_max, ques_skill_path, train_path, device):
-    """按注册表构建模型；GKT 额外从数据构建题目-技能矩阵与转移图。"""
+    """按注册表构建模型；GKT 额外从数据构建题目-技能矩阵与转移图；
+    MIKT/DyGKT/RIGL 需要题目-技能隶属矩阵（MIKT 还要技能数，RIGL 还要 q_matrix）。"""
     cfg = MODELS[model_name]
     if model_name == 'gkt':
         pro2skill, _, skill_max = build_pro2skill(ques_skill_path)
@@ -102,6 +119,16 @@ def build_model(model_name, pro_max, ques_skill_path, train_path, device):
             graph = build_dense_graph(skill_max)
         model = cfg['cls'](num_c=skill_max, pro2skill=pro2skill, graph=graph,
                            **cfg['params'])
+    elif model_name in ('mikt', 'dygkt', 'rigl'):
+        pro2skill, _, skill_max = build_pro2skill(ques_skill_path)
+        if model_name == 'rigl':
+            model = cfg['cls'](pro_max=pro_max, skill_max=skill_max,
+                               q_matrix=pro2skill.numpy(), **cfg['params'])
+        else:  # mikt / dygkt：pro2skill 以 buffer 形式传入（随 .to(device) 搬设备）
+            model = cfg['cls'](pro_max=pro_max, skill_max=skill_max,
+                               pro2skill=pro2skill, **cfg['params'])
+        print(f'[{model_name}] pro_max={pro_max}, skill_max={skill_max}, '
+              f'题目-技能对={int(pro2skill.sum().item())}')
     else:
         kwargs = dict(pro_max=pro_max) if model_name != 'sakt' else dict(num_c=pro_max)
         model = cfg['cls'](**kwargs, **cfg['params'])
@@ -112,23 +139,42 @@ def main():
     parser = argparse.ArgumentParser(description='pyKT 六个基线模型的五折交叉验证')
     parser.add_argument('--model_name', type=str, required=True,
                         choices=sorted(MODELS.keys()),
-                        help='模型名：dkt/dkvmn/akt/sakt/simplekt/ukt/gkt')
+                        help='模型名：dkt/dkvmn/akt/sakt/simplekt/ukt/gkt/mikt/dygkt/rigl')
     parser.add_argument('--dataset', type=str, default='assist09', choices=list(mp2path.keys()))
     parser.add_argument('--n_folds', type=int, default=5)
+    # 便于冒烟测试；默认值与既有基线协议一致（200 轮 / 早停 patience 10）
+    parser.add_argument('--epochs', type=int, default=200)
+    parser.add_argument('--patience', type=int, default=10)
+    # 可选覆盖（默认 None = 用 MODELS 注册表里的值），用于调参实验
+    parser.add_argument('--lr', type=float, default=None)
+    parser.add_argument('--batch_size', type=int, default=None)
+    parser.add_argument('--dropout', type=float, default=None)
+    parser.add_argument('--graph_mode', type=str, default=None,
+                        help='RIGL 动态图模式：peer / group / none')
+    # 只跑指定折（逗号分隔，例如 --only_folds 0），用于快速调参；默认跑满 n_folds 折
+    parser.add_argument('--only_folds', type=str, default=None)
     args = parser.parse_args()
 
     model_name = args.model_name
     dataset = args.dataset
     n_folds = args.n_folds
-    cfg = MODELS[model_name]
+    cfg = dict(MODELS[model_name])          # 复制一份，避免 CLI 覆盖污染注册表
+    if args.lr is not None:
+        cfg['lr'] = args.lr
+    if args.batch_size is not None:
+        cfg['batch_size'] = args.batch_size
+    if args.dropout is not None and 'dropout' in MODELS[model_name]['params']:
+        MODELS[model_name]['params']['dropout'] = args.dropout
+    if args.graph_mode is not None and 'graph_mode' in MODELS[model_name]['params']:
+        MODELS[model_name]['params']['graph_mode'] = args.graph_mode
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     # 对齐 main_dkt.py 的训练协议
-    epochs = 200
+    epochs = args.epochs
     min_seq = 3
     max_seq = 200
     grad_clip = 15.0
-    patience = 10
+    patience = args.patience
 
     p = mp2path[dataset]
     train_skill_path, test_skill_path = p['train_skill_path'], p['test_skill_path']
@@ -143,7 +189,10 @@ def main():
     fold_aucs = []
     all_folds = set(range(n_folds))
 
-    for now_step in range(n_folds):
+    fold_iter = ([int(x) for x in args.only_folds.split(',')]
+                 if args.only_folds else list(range(n_folds)))
+
+    for now_step in fold_iter:
         train_folds = all_folds - {now_step}
 
         model = build_model(model_name, pro_max, p['ques_skill_path'], train_path, device)
@@ -202,14 +251,14 @@ def main():
         avg_acc += test_acc
         fold_aucs.append(test_auc)
 
-    avg_auc /= n_folds
-    avg_acc /= n_folds
+    avg_auc /= len(fold_iter)
+    avg_acc /= len(fold_iter)
 
     # ============ 保存结果：总体 AUC/ACC ============
     result_file = f'./{model_name.upper()}_{dataset}_results.txt'
     with open(result_file, 'w', encoding='utf-8') as f:
         f.write(f'模型: {model_name.upper()} | 数据集: {dataset}\n')
-        f.write(f'总体({n_folds}折平均): AUC={avg_auc:.4f} ACC={avg_acc:.4f}\n')
+        f.write(f'总体({len(fold_iter)}折平均): AUC={avg_auc:.4f} ACC={avg_acc:.4f}\n')
         f.write('逐折总体 AUC: ' + ', '.join(
             f'fold{i}={a:.4f}' for i, a in enumerate(fold_aucs)) + '\n')
     print(f'结果已保存 -> {result_file}')

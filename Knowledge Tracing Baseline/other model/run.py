@@ -36,6 +36,13 @@ def run_epoch(classify, skill_path, model, optimizer, max_problem, path, batch_s
 
             kt_loss = criterion(next_predict, next_true)
 
+            # 可选辅助损失钩子：模型 forward 里写入 model.aux_loss（如 RIGL 的对比损失），
+            # 这里汇总后清空。对没有该属性的模型（其余基线）完全无影响。
+            aux = getattr(model, 'aux_loss', None)
+            if aux is not None:
+                kt_loss = kt_loss + aux
+                model.aux_loss = None
+
             optimizer.zero_grad()
             kt_loss.backward()
 

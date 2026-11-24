@@ -52,6 +52,30 @@ def get_clones(module, N):
     return nn.ModuleList([copy.deepcopy(module) for _ in range(N)])
 
 
+def pad_lens(problem):
+    """推断左侧 zero-padding 序列的真实长度（给需要 mask 的模型用：DyGKT / RIGL / MIKT）。
+
+    本框架 loader 用 `use_problem[-num:] = now_problem` 把会话右对齐，pad 值 = 0，
+    所以 pad 只会出现在左侧前缀。注意题目 id 0 是合法题目，不能用 `(x != 0).sum()`
+    数非零个数；这里取"最后一个非零位置 + 1"作为长度（尾部一定是真实交互，
+    只有整条序列都为 0 的极端情况才回退为 1，避免 valid 全 False 导致 NaN）。
+
+    problem: (batch, seq_len) long → (batch,) long
+    """
+    B, T = problem.shape
+    pos = torch.arange(1, T + 1, device=problem.device).view(1, T)
+    last = ((problem != 0).long() * pos).max(dim=1).values
+    return last.clamp(min=1).long()
+
+
+def valid_mask_from_pad(problem):
+    """基于 pad_lens 的布尔有效位掩码 (batch, seq_len)。"""
+    B, T = problem.shape
+    lens = pad_lens(problem)
+    idx = torch.arange(T, device=problem.device).view(1, T)
+    return idx >= (T - lens).view(B, 1)
+
+
 class CosinePositionalEmbedding(nn.Module):
     """余弦位置编码（simpleKT/UKT 用，pyKT 原样：sin/cos 覆盖偶/奇维，前 0.1*randn 噪声被覆盖）。"""
 
